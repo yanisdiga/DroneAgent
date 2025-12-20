@@ -1,5 +1,5 @@
 import os
-from stable_baselines3 import PPO
+from sb3_contrib import RecurrentPPO
 from stable_baselines3.common.callbacks import BaseCallback
 from drone_env import DroneEnv
 from stable_baselines3.common.vec_env import VecFrameStack, SubprocVecEnv
@@ -37,24 +37,22 @@ if __name__ == '__main__': # Indispensable sous Windows
     # make_vec_env s'occupe de créer les 8 instances, de mettre les Monitor, 
     # et de les emballer dans un SubprocVecEnv.
     env = make_vec_env(DroneEnv, n_envs=8, vec_env_cls=SubprocVecEnv)
-
-    # 2. EMPILAGE D'IMAGES (Mémoire)
-    # On applique directement le FrameStack sur l'environnement vectorisé
-    env = VecFrameStack(env, n_stack=4)
     
-    # 3. CRÉATION DU MODÈLE
-    # ent_coef=0.05 est très bien pour forcer l'exploration
-    model = PPO(
-        "MlpPolicy", 
+    # 3. CRÉATION DU MODÈLE (LSTM / MÉMOIRE)
+    # On utilise maintenant RecurrentPPO avec une politique LSTM ("MlpLstmPolicy")
+    # Cela permet au drone de se souvenir des obstacles récents !
+    model = RecurrentPPO(
+        "MlpLstmPolicy", 
         env, 
-        verbose=0, 
+        verbose=1, 
         device="cpu", 
-        ent_coef=0.05, 
+        ent_coef=0.01, # Un peu moins d'entropie car la curiosité gère déjà l'exploration
         learning_rate=0.0003, 
-        tensorboard_log="./drone_tensorboard/"
+        tensorboard_log="./drone_tensorboard/",
+        policy_kwargs={"lstm_hidden_size": 256} # On donne un gros cerveau mémoire
     )
 
-    print("🚀 Début de l'entraînement TURBO (8 Cœurs + Mémoire 4 frames)...")
+    print("🚀 Début de l'entraînement TURBO (8 Cœurs)...")
     callback = ScoreCallback()
 
     # 4. LANCEMENT

@@ -127,9 +127,9 @@ class DroneEnv(gym.Env):
         if niveau == 1:
             self.obstacles = []
         elif niveau == 2:
-            self.obstacles = create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(3, 7))
+            self.obstacles = create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(1, 3))
         elif niveau == 3:
-            self.obstacles = create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(7, 15))
+            self.obstacles = create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(3, 5))
 
         # 1. Map aléatoire
         self.largeur_carte, self.hauteur_carte = random_map_size()
@@ -158,6 +158,13 @@ class DroneEnv(gym.Env):
             if not any(obs.rect.colliderect(cible_rect) for obs in self.obstacles):
                 break
         
+        # --- INITIALISATION DE LA GRILLE D'EXPLORATION ---
+        # Taille des cellules pour le 'Fog of War'
+        cell_size = 50 
+        self.grid_w = (self.largeur_carte // cell_size) + 1
+        self.grid_h = (self.hauteur_carte // cell_size) + 1
+        self.visited_grid = np.zeros((self.grid_w, self.grid_h), dtype=bool)
+
         # On récupère la pos du drone sous forme d'array numpy pour les calculs mathématiques
         drone_pos_array = np.array(self.drone_agent.get_position())
         self.zones_visitees = [drone_pos_array.copy()]
@@ -215,34 +222,25 @@ class DroneEnv(gym.Env):
             reward -= 0.5 # Aïe ! Bouge de là !
 
         drone_pos_array = np.array(self.drone_agent.get_position())
-
-        # --- 3. LOGIQUE D'EXPLORATION (CORRIGÉE) ---
-        # J'ai supprimé le bloc "Mise à jour plus fréquente" qui causait le bug.
-        
-        # On ne vérifie pas à chaque frame si la liste est vide (optimisation)
-        if not self.zones_visitees:
-            dist_last = 9999
-        else:
-            dist_last = np.linalg.norm(drone_pos_array - self.zones_visitees[-1])
-
         rayon_capteur = self.drone_agent.get_capteur().get_rayon() 
-        
-        # On ne lance le calcul coûteux que si on s'est éloigné de la dernière zone connue
-        if dist_last > rayon_capteur:
-            # On vérifie qu'on est loin de TOUTES les zones passées
-            # (Note : Pour optimiser encore plus, tu pourrais ne vérifier que les 100 dernières)
-            distances = [np.linalg.norm(drone_pos_array - z) for z in self.zones_visitees]
-            
-            if all(d > rayon_capteur for d in distances):
-                # C'EST UNE NOUVELLE ZONE !
-                reward += 0.5 
+
+        # --- 3. LOGIQUE D'EXPLORATION (GRID / FOG OF WAR) ---
+        # On convertit la position en coordonnées de grille (Cellule de 50x50 pixels)
+        grid_x = int(curr_x // 50)
+        grid_y = int(curr_y // 50)
+
+        # Vérification bornes (juste au cas où)
+        if 0 <= grid_x < self.grid_w and 0 <= grid_y < self.grid_h:
+            # Si c'est une cellule JAMAIS visitée
+            if not self.visited_grid[grid_x, grid_y]:
+                self.visited_grid[grid_x, grid_y] = True
                 
-                # On l'ajoute à la mémoire MAINTENANT
+                # RECOMPENSE DE CURIOSITÉ "EUREKA !" 💡
+                # C'est LA récompense qui le motive à tout voir.
+                reward += 2.0 
+                
+                # Petit ajout visuel (optionnel) pour la 'heat map'
                 self.zones_visitees.append(drone_pos_array.copy())
-                
-                # Gestion mémoire
-                if len(self.zones_visitees) > 1000:
-                    self.zones_visitees.pop(0)
 
         # --- 4. Reward Shaping & Victoire ---
         # On utilise le 'CCD' (Continuous Collision Detection) pour ne pas rater la cible
@@ -289,8 +287,10 @@ class DroneEnv(gym.Env):
                     danger_max = max(self._get_obs()[4:20]) # Indices des lidars dans l'obs
                     
                     facteur = 1.0
-                    if danger_max > 0.7: # Si un mur est tout proche
-                        facteur = 0.0 # On coupe la prime de visée ! Il doit d'abord survivre.
+                    # Modification : Seuil plus tolérant (0.85 = très très proche)
+                    # Et surtout : facteur 0.2 au lieu de 0.0
+                    if danger_max > 0.85: 
+                        facteur = 0.2 # On garde une petite motivation pour traverser !
                     
                     # On réduit aussi le 3.0 à 1.0 ou 1.5 pour qu'il soit moins obsédé
                     reward += alignement * 1.5 * facteur
