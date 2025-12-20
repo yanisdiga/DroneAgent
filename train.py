@@ -44,7 +44,7 @@ if __name__ == '__main__': # Indispensable sous Windows
     model = RecurrentPPO(
         "MlpLstmPolicy", 
         env, 
-        verbose=1, 
+        verbose=0, 
         device="cpu", 
         ent_coef=0.01, # Un peu moins d'entropie car la curiosité gère déjà l'exploration
         learning_rate=0.0003, 
