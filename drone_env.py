@@ -236,8 +236,9 @@ class DroneEnv(gym.Env):
                 self.visited_grid[grid_x, grid_y] = True
                 
                 # RECOMPENSE DE CURIOSITÉ "EUREKA !" 💡
-                # C'est LA récompense qui le motive à tout voir.
-                reward += 2.0 
+                # On baisse un peu pour ne pas qu'il ignore la cible (2.0 -> 0.5)
+                # Mais ça reste rentable pour explorer
+                reward += 0.5 
                 
                 # Petit ajout visuel (optionnel) pour la 'heat map'
                 self.zones_visitees.append(drone_pos_array.copy())
@@ -280,20 +281,20 @@ class DroneEnv(gym.Env):
                 alignement = np.dot(vec_cible / norm_cible, vec_vitesse / norm_vitesse)
                 
                 # --- CHANGEMENT ICI ---
-                # 1. On récompense plus largement l'alignement (plus facile à déclencher)
+                # On recompense massivement l'alignement quand on est proches
                 if alignement > 0.5:
-                    # On regarde si la voie est libre devant (les rayons centraux du Lidar)
-                    # Tes indices centraux dépendent de ton Capteur, disons qu'on prend le max de danger global
-                    danger_max = max(self._get_obs()[4:20]) # Indices des lidars dans l'obs
+                    danger_max = max(self._get_obs()[4:20]) 
                     
                     facteur = 1.0
-                    # Modification : Seuil plus tolérant (0.85 = très très proche)
-                    # Et surtout : facteur 0.2 au lieu de 0.0
                     if danger_max > 0.85: 
-                        facteur = 0.2 # On garde une petite motivation pour traverser !
+                        facteur = 0.5 # On est un peu plus téméraire (0.2 -> 0.5)
                     
-                    # On réduit aussi le 3.0 à 1.0 ou 1.5 pour qu'il soit moins obsédé
-                    reward += alignement * 1.5 * facteur
+                    # BOOST MASSIF : 1.5 -> 5.0
+                    reward += alignement * 5.0 * facteur
+                    
+                    # BONUS DE PROXIMITÉ (Plus on est près, plus c'est rentable)
+                    # Ex: à 10px -> (80 - 10) * 0.1 = +7 points !
+                    reward += (rayon_capteur - dist_arret) * 0.1
 
         # VICTOIRE : On vérifie si on a touché la zone à un moment du trajet
         if dist_reelle <= self.rayon_capture:
