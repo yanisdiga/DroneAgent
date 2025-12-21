@@ -7,7 +7,7 @@ from drone_env import DroneEnv
 env = DroneEnv(render_mode="human")
 
 print("Chargement du modèle LSTM...")
-model = RecurrentPPO.load("drone_model_final") # Charge le bon fichier
+model = RecurrentPPO.load("drone_model_best") # Charge le bon fichier
 print("Modèle chargé ! 🧠")
 
 obs, _ = env.reset()
