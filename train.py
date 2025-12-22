@@ -4,6 +4,8 @@ from stable_baselines3.common.callbacks import BaseCallback
 from drone_env import DroneEnv
 from stable_baselines3.common.vec_env import VecFrameStack, SubprocVecEnv
 from stable_baselines3.common.env_util import make_vec_env
+from Capteur import Capteur
+from Drone import Drone
 
 # --- Callback pour voir la progression ---
 class ScoreCallback(BaseCallback):
@@ -36,7 +38,9 @@ if __name__ == '__main__': # Indispensable sous Windows
     # 1. CRÉATION PARALLÈLE (8 environnements)
     # make_vec_env s'occupe de créer les 8 instances, de mettre les Monitor, 
     # et de les emballer dans un SubprocVecEnv.
-    env = make_vec_env(DroneEnv, n_envs=8, vec_env_cls=SubprocVecEnv)
+    capteur = Capteur(rayon=80)
+    drone = Drone(id=1, x=0, y=0, capteur=capteur, vitesse=5)
+    env = make_vec_env(DroneEnv, n_envs=8, vec_env_cls=SubprocVecEnv, env_kwargs={"drone": drone, "capteur": capteur})
     
     # 3. CRÉATION DU MODÈLE (LSTM / MÉMOIRE)
     # On utilise maintenant RecurrentPPO avec une politique LSTM ("MlpLstmPolicy")
@@ -44,9 +48,9 @@ if __name__ == '__main__': # Indispensable sous Windows
     model = RecurrentPPO(
         "MlpLstmPolicy", 
         env, 
-        verbose=0, 
-        device="cpu", 
-        ent_coef=0.01, # Un peu moins d'entropie car la curiosité gère déjà l'exploration
+        verbose=1, 
+        device="auto", 
+        ent_coef=0.05, # Un peu moins d'entropie car la curiosité gère déjà l'exploration
         learning_rate=0.0003, 
         tensorboard_log="./drone_tensorboard/",
         policy_kwargs={"lstm_hidden_size": 256} # On donne un gros cerveau mémoire
@@ -58,7 +62,7 @@ if __name__ == '__main__': # Indispensable sous Windows
     # 4. LANCEMENT
     # Note : 500 000 steps total divisé par 8 envs = 62 500 steps par env.
     # C'est très rapide. Tu peux monter à 1 000 000 ou 2 000 000 si besoin.
-    model.learn(total_timesteps=1000000, callback=callback)
+    model.learn(total_timesteps=500000, callback=callback)
 
     # 5. SAUVEGARDE FINALE
     model.save("drone_model_final")

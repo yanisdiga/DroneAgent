@@ -2,6 +2,9 @@ from Capteur import Capteur
 
 class Drone:
     def __init__(self, id, x, y, capteur, vitesse=1):
+        ''' 
+        Constructeur de la classe Drone
+        '''
         self.id = id
         self.x = x
         self.y = y
@@ -9,40 +12,76 @@ class Drone:
         self.vitesse = vitesse
 
     def get_id(self):
+        ''' 
+        Renvoie l'ID du drone
+        '''
         return self.id
 
     def get_x(self):
+        ''' 
+        Renvoie la position x du drone
+        '''
         return self.x
 
     def get_y(self):
+        ''' 
+        Renvoie la position y du drone
+        '''
         return self.y
 
     def get_position(self):
+        ''' 
+        Renvoie la position (x, y) du drone
+        '''
         return (self.x, self.y)
 
     def get_capteur(self):
+        ''' 
+        Renvoie le capteur du drone
+        '''
         return self.capteur
 
     def get_vitesse(self):
+        ''' 
+        Renvoie la vitesse du drone
+        '''
         return self.vitesse
 
     def set_x(self, x):
+        ''' 
+        Modifie la position x du drone
+        '''
         self.x = x
 
     def set_y(self, y):
+        ''' 
+        Modifie la position y du drone
+        '''
         self.y = y
 
     def set_position(self, x, y):
+        ''' 
+        Modifie la position (x, y) du drone
+        '''
         self.x = x
         self.y = y
 
     def set_capteur(self, capteur):
+        ''' 
+        Modifie le capteur du drone
+        '''
         self.capteur = capteur
 
     def set_vitesse(self, vitesse):
+        ''' 
+        Modifie la vitesse du drone
+        '''
         self.vitesse = vitesse
 
     def action(self, action):
+        ''' 
+        Modifie la position du drone en fonction de l'action
+        '''
         if action=="forward":
             self.set_y(self.get_y()+self.vitesse)
         elif action=="backward":
@@ -53,6 +92,9 @@ class Drone:
             self.set_x(self.get_x()+self.vitesse)
 
     def move_vector(self, dx, dy, map_width, map_height):
+        ''' 
+        Modifie la position du drone en fonction du vecteur (dx, dy)
+        '''
         # 1. Appliquer le mouvement
         self.x += dx
         self.y += dy

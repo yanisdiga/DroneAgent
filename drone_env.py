@@ -5,72 +5,13 @@ import pygame
 from Obstacle import Obstacle
 from Drone import Drone
 from Capteur import Capteur
-
-def random_map_size():
-    width_map = np.random.randint(800, 1200)
-    height_map = np.random.randint(600, 800)
-    return (width_map, height_map)
-
-def create_random_obstacle(map_size):
-    width_map, height_map = map_size
-    width_obstacle = np.random.randint(50, 200)
-    height_obstacle = np.random.randint(50, 200)
-    x = np.random.randint(0, width_map - width_obstacle)
-    y = np.random.randint(0, height_map - height_obstacle)
-    return Obstacle(x, y, width_obstacle, height_obstacle)
-
-def create_random_obstacles(map_size, num_obstacles):
-    obstacles = []
-    width_map, height_map = map_size
-    
-    # On tente de placer num_obstacles
-    for _ in range(num_obstacles):
-        # On essaie plusieurs fois de trouver une place libre pour cet obstacle
-        for _ in range(10): # 10 tentatives max par obstacle
-            w = np.random.randint(50, 200)
-            h = np.random.randint(50, 200)
-            x = np.random.randint(20, width_map - w - 20)
-            y = np.random.randint(20, height_map - h - 20)
-            
-            new_obs = Obstacle(x, y, w, h)
-            
-            # Vérification de chevauchement avec les obstacles existants
-            # On utilise .rect.colliderect car c'est natif et gère les chevauchements partiels
-            overlap = any(new_obs.rect.colliderect(o.rect) for o in obstacles)
-            
-            if not overlap:
-                obstacles.append(new_obs)
-                break # Place trouvée, on passe à l'obstacle suivant
-                
-    return obstacles
-
-def dist_segment_point(p1, p2, p3):
-    """
-    Calcule la distance minimale entre le point p3 et le segment [p1, p2].
-    p1: Ancienne position du drone
-    p2: Nouvelle position du drone
-    p3: Position de la cible
-    """
-    p1 = np.array(p1)
-    p2 = np.array(p2)
-    p3 = np.array(p3)
-
-    # Si le drone n'a pas bougé
-    if np.all(p1 == p2):
-        return np.linalg.norm(p3 - p1)
-
-    # Projection vectorielle pour trouver le point le plus proche sur la droite
-    l2 = np.sum((p1 - p2)**2)
-    t = np.sum((p3 - p1) * (p2 - p1)) / l2
-    
-    # On borne t entre 0 et 1 pour rester sur le segment (pas la droite infinie)
-    t = max(0, min(1, t))
-    
-    projection = p1 + t * (p2 - p1)
-    return np.linalg.norm(p3 - projection)
+import Utils as utils
 
 class DroneEnv(gym.Env):
-    def __init__(self, render_mode=None):
+    def __init__(self, drone, capteur, render_mode=None):
+        '''
+        Constructeur de l'environnement
+        '''
         super(DroneEnv, self).__init__()
         self.render_mode = render_mode
         self.screen = None
@@ -81,11 +22,14 @@ class DroneEnv(gym.Env):
             "MAP_SIZE_MIN": (800, 600),
             "MAP_SIZE_MAX": (1200, 800),
             "MAX_STEPS": 2000,
-            "RAYON_LIDAR": 80,
+            "PATIENCE": 500,
+            "RAYON_LIDAR": capteur.rayon,
             "RAYON_CAPTURE": 20,
-            "VITESSE": 5,
+            "VITESSE": drone.vitesse,
             "REWARD_TARGET": 1000.0,
             "REWARD_EXPLORATION": 0.5,
+            "ENNUI_FACTOR": 0.01,  # Combien ça fait mal par step
+            "ENNUI_CAP": 50,       # Plafond du multiplicateur (Max -0.5)
         }
 
         self.largeur_carte, self.hauteur_carte = self.CONFIG["MAP_SIZE_MIN"]
@@ -93,33 +37,27 @@ class DroneEnv(gym.Env):
         
         # --- Intégration de tes Classes POO ---
         # On crée un Capteur avec le rayon défini
-        self.mon_capteur = Capteur(rayon=self.CONFIG["RAYON_LIDAR"]) 
+        self.mon_capteur = capteur
         # On crée le Drone (position temporaire 0,0)
-        self.drone_agent = Drone(id=1, x=0, y=0, capteur=self.mon_capteur, vitesse=self.CONFIG["VITESSE"])
+        self.drone_agent = drone
         
         self.obstacles = []
         self.rayon_capture = self.CONFIG["RAYON_CAPTURE"]
 
         # --- Espaces d'Action et d'Observation ---
-        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(20,), dtype=np.float32)
+        # 2 Vitesse + 2 Radar + 1 Proximité + 16 Lidar + 4 Exploration = 25
+        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(25,), dtype=np.float32)
         self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         
         # Observation identique
-        low_obs = np.array([0]*20, dtype=np.float32)
-        high_obs = np.array([1]*20, dtype=np.float32)
+        low_obs = np.array([-1.0]*25, dtype=np.float32) # Correction: -1.0 car vitesse/radar peuvent être négatifs
+        high_obs = np.array([1.0]*25, dtype=np.float32)
         self.observation_space = spaces.Box(low=low_obs, high=high_obs, dtype=np.float32)
 
-    def _add_walls(self):
-        ep = 20 # Epaisseur
-        self.murs = [
-            Obstacle(0, 0, self.largeur_carte, ep),
-            Obstacle(0, self.hauteur_carte - ep, self.largeur_carte, ep),
-            Obstacle(0, 0, ep, self.hauteur_carte),
-            Obstacle(self.largeur_carte - ep, 0, ep, self.hauteur_carte)
-        ]
-        self.obstacles.extend(self.murs)
-
     def reset(self, seed=None, options=None):
+        '''
+        Fonction de reset de l'environnement permettant de réinitialiser l'état de l'environnement
+        '''
         super().reset(seed=seed)
 
         niveau = np.random.choice([1, 2, 3], p=[0.5, 0.3, 0.2]) 
@@ -127,16 +65,16 @@ class DroneEnv(gym.Env):
         if niveau == 1:
             self.obstacles = []
         elif niveau == 2:
-            self.obstacles = create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(1, 3))
+            self.obstacles = utils.create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(1, 3))
         elif niveau == 3:
-            self.obstacles = create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(3, 5))
+            self.obstacles = utils.create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(3, 5))
 
         # 1. Map aléatoire
-        self.largeur_carte, self.hauteur_carte = random_map_size()
+        self.largeur_carte, self.hauteur_carte = utils.random_map_size()
         
         # 2. Obstacles aléatoires
-        self.obstacles = create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(3, 7))
-        self._add_walls() # Ajout des murs
+        self.obstacles = utils.create_random_obstacles((self.largeur_carte, self.hauteur_carte), np.random.randint(3, 7))
+        self.obstacles.extend(utils.add_walls(self.largeur_carte, self.hauteur_carte, 20))
         
         # 3. Position Drone (On utilise ton objet Drone !)
         while True:
@@ -168,7 +106,10 @@ class DroneEnv(gym.Env):
         # On récupère la pos du drone sous forme d'array numpy pour les calculs mathématiques
         drone_pos_array = np.array(self.drone_agent.get_position())
         self.zones_visitees = [drone_pos_array.copy()]
+
         self.current_step = 0
+        self.steps_since_discovery = 0
+        self.consecutive_visited_steps = 0
 
         diff = self.cible_pos - drone_pos_array
         self.distance_precedente = np.linalg.norm(diff)
@@ -176,6 +117,9 @@ class DroneEnv(gym.Env):
         return self._get_obs(), {}
 
     def step(self, action):
+        '''
+        Fonction de step de l'environnement permettant de mettre à jour l'état de l'environnement
+        '''
         # Initialisation reward (Coût de la vie/temps)
         reward = -0.1 
         terminated = False
@@ -226,23 +170,43 @@ class DroneEnv(gym.Env):
 
         # --- 3. LOGIQUE D'EXPLORATION (GRID / FOG OF WAR) ---
         # On convertit la position en coordonnées de grille (Cellule de 50x50 pixels)
+
         grid_x = int(curr_x // 50)
         grid_y = int(curr_y // 50)
+        
+        is_new_cell = False # Drapeau pour savoir si on a exploré ce tour-ci
 
-        # Vérification bornes (juste au cas où)
+        grid_x = int(curr_x // 50)
+        grid_y = int(curr_y // 50)
+        
+        is_new_cell = False 
+
         if 0 <= grid_x < self.grid_w and 0 <= grid_y < self.grid_h:
-            # Si c'est une cellule JAMAIS visitée
             if not self.visited_grid[grid_x, grid_y]:
+                # --- DÉCOUVERTE (C'est la fête !) ---
                 self.visited_grid[grid_x, grid_y] = True
-                
-                # RECOMPENSE DE CURIOSITÉ "EUREKA !" 💡
-                # On baisse un peu pour ne pas qu'il ignore la cible (2.0 -> 0.5)
-                # Mais ça reste rentable pour explorer
                 reward += 0.5 
-                
-                # Petit ajout visuel (optionnel) pour la 'heat map'
+                is_new_cell = True 
                 self.zones_visitees.append(drone_pos_array.copy())
-
+                
+                # Le drone est content, il oublie son ennui
+                self.consecutive_visited_steps = 0 
+            else:
+                # --- DÉJÀ VU (La pression monte) ---
+                self.consecutive_visited_steps += 1
+                
+                # Calcul de la pénalité progressive
+                # On cape le multiplicateur pour éviter le suicide (Max 50)
+                facteur = min(self.consecutive_visited_steps, self.CONFIG["ENNUI_CAP"])
+                
+                # Pénalité = -0.01 * facteur
+                # Ex: au bout de 50 steps, il perd -0.5 par mouvement !
+                reward -= self.CONFIG["ENNUI_FACTOR"] * facteur
+        
+        if is_new_cell:
+            self.steps_since_discovery = 0 # <-- On reset le compteur, bravo !
+        else:
+            self.steps_since_discovery += 1 # <-- On s'impatiente...
         # --- 4. Reward Shaping & Victoire ---
         # On utilise le 'CCD' (Continuous Collision Detection) pour ne pas rater la cible
         
@@ -250,7 +214,7 @@ class DroneEnv(gym.Env):
         dist_arret = np.linalg.norm(self.cible_pos - drone_pos_array)
         
         # Distance minimale durant le trajet (NOUVEAU)
-        dist_trajet = dist_segment_point(prev_pos, drone_pos_array, self.cible_pos)
+        dist_trajet = utils.dist_segment_point(prev_pos, drone_pos_array, self.cible_pos)
         
         # On gagne si on s'arrête dessus OU si on l'a traversée
         # (On prend le min des deux pour être sûr)
@@ -259,17 +223,39 @@ class DroneEnv(gym.Env):
         # Guidage terminal (Chaud/Froid)
         # On utilise dist_arret pour le guidage car on veut qu'il s'arrête dessus idéalement
         if dist_arret <= rayon_capteur:
+            
+            # 1. L'EFFET AIMANT (MAGNETISM)
+            # Dès qu'il la voit, il gagne des points juste pour rester à proximité.
+            # C'est supérieur au bonus d'exploration (+0.5), donc il ne voudra plus partir.
+            reward += 2.0 
+            
+            # 2. APPROCHE AGRESSIVE
             if dist_arret < self.distance_precedente:
-                bonus = 10.0 / (dist_arret + 1.0) 
+                # On booste le gain quand il s'approche
+                # Formule exponentielle : plus il est près, plus ça rapporte
+                bonus = 30.0 / (dist_arret + 1.0) 
                 reward += bonus
             else:
-                reward -= 0.1 
+                # 3. INTERDICTION DE RECULER
+                # C'est ICI que tout change.
+                # Avant, tu avais : "if not is_new_cell: reward -= 0.1"
+                # Maintenant : ON PUNIT TOUT LE TEMPS.
+                # Même s'il y a une case inexplorée derrière lui, s'il recule alors qu'il voit la cible : PUNITION.
+                reward -= 5.0
         
         self.distance_precedente = dist_arret
 
-       # --- 5. PRIME DE VISÉE (Target Lock) 🔫 ---
+        # --- 5. PRIME DE VISÉE (Target Lock) 🔫 ---
         # On utilise dist_arret (calculé plus haut)
-        if dist_arret <= rayon_capteur: 
+        
+        target_detected = (dist_arret <= rayon_capteur)
+        
+        if target_detected:
+            # --- HUNTER MODE ACTIF 🦁 ---
+            if is_new_cell:
+                # ANNULATION du bonus d'exploration : On ne veut pas qu'il soit distrait !
+                reward -= 0.5 
+            
             vec_cible = self.cible_pos - drone_pos_array
             vec_vitesse = np.array([dx, dy]) 
             
@@ -301,14 +287,22 @@ class DroneEnv(gym.Env):
             reward += 1000.0
             terminated = True
 
+        # --- AJOUT : ARRÊT PRÉMATURÉ (TIMEOUT DE PATIENCE) ---
+        if self.steps_since_discovery >= self.CONFIG["PATIENCE"]:
+            truncated = True # On coupe l'épisode
+            reward -= 5.0 # Petite punition pour dire "Tu étais trop lent/bloqué"
+
         self.current_step += 1
-        
+        # Max steps arret
         if self.current_step >= self.max_steps:
             truncated = True
 
         return self._get_obs(), reward, terminated, truncated, {}
 
     def _get_obs(self):
+        '''
+        Fonction de récupération des observations
+        '''
         # 1. RADAR (C'est OK : un capteur radio peut donner la direction de la cible)
         # On garde le vecteur normalisé vers la cible, mais PAS la position absolue du drone.
         # Note : Si tu veux être HARDCORE, tu retires aussi ça et tu ne lui donnes
@@ -333,10 +327,9 @@ class DroneEnv(gym.Env):
         def check_collision(rect_test):
             return any(obs.rect.colliderect(rect_test) for obs in self.obstacles)
 
-        lidar_distances = self.drone_agent.capteur.scan_lidar(self.drone_agent.get_position(), check_collision)
+        lidar_distances = self.drone_agent.capteur.scan_lidar(self.drone_agent.get_position(), self.obstacles)
         
-        # IMPORTANT : On garde les distances brutes pour le dessin (render)
-        self.last_sensors = lidar_distances 
+        self.last_sensors = lidar_distances
 
         # --- AMÉLIORATION ICI ---
         # On inverse les valeurs pour le cerveau :
@@ -348,55 +341,88 @@ class DroneEnv(gym.Env):
         if not hasattr(self, 'current_velocity'):
             self.current_velocity = np.array([0.0, 0.0])
         vel_x, vel_y = self.current_velocity
+        
+        # --- NOUVEAU : CAPTEURS D'EXPLORATION (4 valeurs) ---
+        curr_x, curr_y = self.drone_agent.get_position()
+        gx = int(curr_x // 50) # Coordonnée grille actuelle
+        gy = int(curr_y // 50)
+        
+        # On vérifie les 4 voisins (Haut, Bas, Gauche, Droite)
+        # 0.0 = Inconnu (Bon), 1.0 = Déjà visité (Ennuyeux) ou Hors Map (Mur)
+        explo_sensors = []
+        
+        offsets = [(0, -1), (0, 1), (-1, 0), (1, 0)] # Nord, Sud, Ouest, Est
+        
+        for dx, dy in offsets:
+            nx, ny = gx + dx, gy + dy
+            
+            # Si hors de la carte, on considère comme "visité" pour ne pas qu'il y aille
+            if not (0 <= nx < self.grid_w and 0 <= ny < self.grid_h):
+                explo_sensors.append(1.0)
+            # Sinon, on regarde si c'est True (visité) ou False (nouveau)
+            elif self.visited_grid[nx, ny]:
+                explo_sensors.append(1.0)
+            else:
+                explo_sensors.append(0.0) # C'est nouveau !
 
-        # On donne 'lidar_danger' au lieu de 'lidar_distances' à l'IA
-        obs = np.array([vel_x, vel_y] + radar_info + lidar_danger, dtype=np.float32)
+        # Assemblage final (25 valeurs)
+        # Ajout du Capteur de Proximité Radar (0.0 = Loin/Pas vu, 1.0 = Dessus)
+        radar_proximity = 0.0
+        if dist <= rayon_radar:
+            radar_proximity = max(0.0, 1.0 - (dist / rayon_radar))
+            
+        obs = np.array([vel_x, vel_y] + radar_info + [radar_proximity] + lidar_danger + explo_sensors, dtype=np.float32)
         
         return obs
 
     def render(self):
-        # (Ton render était bon, juste s'assurer d'utiliser self.drone_agent.get_position())
-        if self.render_mode is None: return
-        if self.screen is None or self.screen.get_width() != self.largeur_carte:
-            pygame.init()
-            self.screen = pygame.display.set_mode((self.largeur_carte, self.hauteur_carte))
-            self.clock = pygame.time.Clock()
+        '''
+        Fonction de render de l'environnement permettant l'affichage
+        de la carte et des obstacles avec pygame.
+        '''
+        if self.render_mode == "human":
+            if self.screen is None or self.screen.get_width() != self.largeur_carte:
+                pygame.init()
+                self.screen = pygame.display.set_mode((self.largeur_carte, self.hauteur_carte))
+                self.clock = pygame.time.Clock()
 
-        self.screen.fill((20, 20, 20))
-        for obs in self.obstacles:
-            obs.draw(self.screen)
-        
-        # Récupération rayon depuis l'objet Capteur
-        r = int(self.drone_agent.get_capteur().get_rayon())
-        
-        for centre in self.zones_visitees:
-            s = pygame.Surface((r*2, r*2), pygame.SRCALPHA)
-            pygame.draw.circle(s, (40, 40, 70, 128), (r, r), r)
-            self.screen.blit(s, (centre[0]-r, centre[1]-r))
+            self.screen.fill((20, 20, 20))
+            for obs in self.obstacles:
+                obs.draw(self.screen)
+            
+            # Récupération rayon depuis l'objet Capteur
+            r = int(self.drone_agent.get_capteur().get_rayon())
+            
+            for centre in self.zones_visitees:
+                s = pygame.Surface((r*2, r*2), pygame.SRCALPHA)
+                pygame.draw.circle(s, (40, 40, 70, 128), (r, r), r)
+                self.screen.blit(s, (centre[0]-r, centre[1]-r))
 
-        pos_int = (int(self.drone_agent.get_x()), int(self.drone_agent.get_y()))
-        
-        # --- Visualization Lidar ---
-        if hasattr(self, 'last_sensors'):
-            for i, dist_norm in enumerate(self.last_sensors):
-                dist_pixel = dist_norm * r # r est le rayon du capteur
-                
-                # On récupère la direction déjà normalisée depuis le capteur
-                dx, dy = self.drone_agent.capteur.normalized_directions[i]
-                
-                # Plus besoin de normaliser ici !
-                end_x = pos_int[0] + dx * dist_pixel
-                end_y = pos_int[1] + dy * dist_pixel
-                
-                # Couleur: Rouge si obstacle touché (dist < 1.0), Vert si rien (dist == 1.0)
-                # On met une tolérance car float
-                color = (0, 255, 0) if dist_norm >= 0.99 else (255, 0, 0)
-                
-                pygame.draw.line(self.screen, color, pos_int, (end_x, end_y), 2)
-        
-        pygame.draw.circle(self.screen, (80, 80, 80), pos_int, r, 1) # Radar
-        pygame.draw.circle(self.screen, (255, 0, 0), self.cible_pos.astype(int), 10) 
-        pygame.draw.circle(self.screen, (0, 255, 0), pos_int, 8) # Drone
-        
-        pygame.display.flip()
-        self.clock.tick(60)
+            pos_int = (int(self.drone_agent.get_x()), int(self.drone_agent.get_y()))
+            
+            # --- Visualization Lidar ---
+            if hasattr(self, 'last_sensors'):
+                for i, dist_norm in enumerate(self.last_sensors):
+                    dist_pixel = dist_norm * r # r est le rayon du capteur
+                    
+                    # On récupère la direction déjà normalisée depuis le capteur
+                    dx, dy = self.drone_agent.capteur.normalized_directions[i]
+                    
+                    # Plus besoin de normaliser ici !
+                    end_x = pos_int[0] + dx * dist_pixel
+                    end_y = pos_int[1] + dy * dist_pixel
+                    
+                    # Couleur: Rouge si obstacle touché (dist < 1.0), Vert si rien (dist == 1.0)
+                    # On met une tolérance car float
+                    color = (0, 255, 0) if dist_norm >= 0.99 else (255, 0, 0)
+                    
+                    pygame.draw.line(self.screen, color, pos_int, (end_x, end_y), 2)
+            
+            pygame.draw.circle(self.screen, (80, 80, 80), pos_int, r, 1) # Radar
+            pygame.draw.circle(self.screen, (255, 0, 0), self.cible_pos.astype(int), 10) 
+            pygame.draw.circle(self.screen, (0, 255, 0), pos_int, 8) # Drone
+            
+            pygame.display.flip()
+            self.clock.tick(60)
+        else:
+            return

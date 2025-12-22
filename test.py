@@ -3,11 +3,15 @@ import pygame
 import numpy as np
 from sb3_contrib import RecurrentPPO # Import Contrib
 from drone_env import DroneEnv
+from Drone import Drone
+from Capteur import Capteur
 
-env = DroneEnv(render_mode="human")
+capteur = Capteur(rayon=80)
+drone = Drone(id=1, x=0, y=0, capteur=capteur, vitesse=4)
+env = DroneEnv(drone, capteur, render_mode="human")
 
 print("Chargement du modèle LSTM...")
-model = RecurrentPPO.load("drone_model_best") # Charge le bon fichier
+model = RecurrentPPO.load("drone_model_final") # Charge le bon fichier
 print("Modèle chargé ! 🧠")
 
 obs, _ = env.reset()
@@ -34,7 +38,8 @@ for ep in range(episodes):
     while not terminated and not truncated:
         # IMPORTANT : On passe 'lstm_states' et on récupère le NOUVEAU 'lstm_states'
         # C'est comme ça que le drone se souvient du passé.
-        action, lstm_states = model.predict(obs, state=lstm_states, deterministic=True)
+        # On utilise deterministic=True pour voir le "vrai" comportement appris (sans bruit aléatoire)
+        action, _states = model.predict(obs, state=lstm_states, deterministic=True)
         
         obs, reward, terminated, truncated, info = env.step(action)
         score += reward
