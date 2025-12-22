@@ -28,8 +28,12 @@ class DroneEnv(gym.Env):
             "VITESSE": drone.vitesse,
             "REWARD_TARGET": 1000.0,
             "REWARD_EXPLORATION": 0.5,
-            "ENNUI_FACTOR": 0.01,  # Combien ça fait mal par step
-            "ENNUI_CAP": 50,       # Plafond du multiplicateur (Max -0.5)
+            # MODIFICATION 1 : MOINS DE PRESSION
+            # On divise la punition par 10. Le drone a le droit de prendre son temps pour viser.
+            "ENNUI_FACTOR": 0.005,  
+            "ENNUI_CAP": 50,
+            "DECAY_RATE": 0.998,  # (Quasi permanent) Vitesse de refroidissement des traces (plus c'est bas, plus ça disparait vite)
+            "STUCK_THRESHOLD": 10, # Nombre de frames bloqué avant de secouer
         }
 
         self.largeur_carte, self.hauteur_carte = self.CONFIG["MAP_SIZE_MIN"]
@@ -59,6 +63,10 @@ class DroneEnv(gym.Env):
         Fonction de reset de l'environnement permettant de réinitialiser l'état de l'environnement
         '''
         super().reset(seed=seed)
+        
+        # --- MODIFICATION 2 : VITESSE ALÉATOIRE ---
+        vitesse_aleatoire = np.random.uniform(3.0, 7.0)
+        self.drone_agent.set_vitesse(vitesse_aleatoire)
 
         niveau = np.random.choice([1, 2, 3], p=[0.5, 0.3, 0.2]) 
         
@@ -96,12 +104,15 @@ class DroneEnv(gym.Env):
             if not any(obs.rect.colliderect(cible_rect) for obs in self.obstacles):
                 break
         
-        # --- INITIALISATION DE LA GRILLE D'EXPLORATION ---
-        # Taille des cellules pour le 'Fog of War'
+        # --- NOUVELLE LOGIQUE EXPLORATION (HEATMAP) ---
         cell_size = 50 
         self.grid_w = (self.largeur_carte // cell_size) + 1
         self.grid_h = (self.hauteur_carte // cell_size) + 1
-        self.visited_grid = np.zeros((self.grid_w, self.grid_h), dtype=bool)
+        
+        # Grille de "Chaleur" (Float) au lieu de Bool
+        self.heatmap = np.zeros((self.grid_w, self.grid_h), dtype=np.float32)
+
+        self.stuck_counter = 0 # Compteur pour le Shake
 
         # On récupère la pos du drone sous forme d'array numpy pour les calculs mathématiques
         drone_pos_array = np.array(self.drone_agent.get_position())
@@ -121,179 +132,171 @@ class DroneEnv(gym.Env):
         Fonction de step de l'environnement permettant de mettre à jour l'état de l'environnement
         '''
         # Initialisation reward (Coût de la vie/temps)
-        reward = -0.1 
+        reward = -0.01
         terminated = False
         truncated = False
 
         # Sauvegarde la position AVANT mouvement
         prev_pos = np.array(self.drone_agent.get_position())
 
-        # --- 1. Calcul de la vitesse voulue ---
+        # --- 1. REFROIDISSEMENT DE LA CARTE (Time Decay) ---
+        # Les anciennes traces s'effacent petit à petit (Mémoire organique).
+        self.heatmap *= self.CONFIG["DECAY_RATE"]
+
+        # --- 2. CALCUL DU MOUVEMENT & GESTION "STUCK" ---
         vitesse = self.drone_agent.get_vitesse()
         dx = action[0] * vitesse
         dy = action[1] * vitesse
         
         curr_x, curr_y = self.drone_agent.get_position()
 
-        # --- 2. Physique de Glissement (Wall Sliding) ---
+        # Test de collision prédictif (Pour le Wall Sliding et le Stuck Counter)
         test_rect_x = pygame.Rect((curr_x + dx) - 5, curr_y - 5, 10, 10)
-        collision_x = any(obs.rect.colliderect(test_rect_x) for obs in self.obstacles)
-
-        test_rect_y = pygame.Rect(curr_x - 5, (curr_y + dy) - 5, 10, 10)
-        collision_y = any(obs.rect.colliderect(test_rect_y) for obs in self.obstacles)
-
-        # Pénalité de collision (Moins violente qu'avant, c'est bien)
-        if collision_x or collision_y:
-            reward -= 1.0
+        col_x = any(obs.rect.colliderect(test_rect_x) for obs in self.obstacles)
         
-        move_x = 0 if collision_x else dx
-        move_y = 0 if collision_y else dy
+        test_rect_y = pygame.Rect(curr_x - 5, (curr_y + dy) - 5, 10, 10)
+        col_y = any(obs.rect.colliderect(test_rect_y) for obs in self.obstacles)
+        
+        # Gestion du compteur de blocage
+        if col_x or col_y:
+            reward -= 0.05 # Petite punition collision
+
+        # --- LE "SHAKE" (SECOUSSE) 🌪️ ---
+        # Si bloqué depuis X frames, on ignore le réseau de neurones et on force un mouvement aléatoire
+        if self.stuck_counter > self.CONFIG["STUCK_THRESHOLD"]:
+            # On secoue fort (bruit aléatoire pur) pour se décoincer
+            dx += np.random.uniform(-vitesse, vitesse) * 2.0
+            dy += np.random.uniform(-vitesse, vitesse) * 2.0
+            # Punition pour inciter à ne pas se retrouver coincé
+            reward -= 0.1
+
+        # Application physique (Wall Sliding)
+        # Si collision, on annule le mouvement sur l'axe concerné
+        move_x = 0 if col_x else dx
+        move_y = 0 if col_y else dy
+
+        # EXCEPTION : Si on est en mode "Shake", on force le mouvement même si collision détectée
+        # (L'objet Drone.py gère le clamping dans la carte, donc il ne sortira pas)
+        if self.stuck_counter > self.CONFIG["STUCK_THRESHOLD"]:
+            move_x = dx
+            move_y = dy
 
         self.drone_agent.move_vector(move_x, move_y, self.largeur_carte, self.hauteur_carte)
 
-        # Position APRÈS mouvement
+        # --- 3. PROPRIOCEPTION & ANTI-CAMPING ---
         new_pos = np.array(self.drone_agent.get_position())
+        dist_parcourue = np.linalg.norm(new_pos - prev_pos)
 
-        # Calcul Proprioception (Vitesse ressentie)
+        # On considère qu'on est "Stuck" SEULEMENT si on a parcouru moins de 0.5 pixel
+        # Même si on touche un mur (col_x=True), tant qu'on avance (sliding), on n'est PAS stuck.
+        if dist_parcourue < 0.5:
+            self.stuck_counter += 1
+        else:
+            self.stuck_counter = 0 # On bouge, tout va bien !
+        
+        # Vitesse ressentie
         real_velocity = (new_pos - prev_pos) / self.drone_agent.get_vitesse()
         self.current_velocity = real_velocity
-
         vitesse_reelle_norm = np.linalg.norm(real_velocity)
         
-        # ANTI-CAMPING : Si le drone fait du surplace (bloqué ou hésitant)
-        # Seuil 0.05 car ta vitesse max est normalisée
-        if vitesse_reelle_norm < 0.05:
+        # Si le drone fait du surplace (hors mode Shake)
+        if vitesse_reelle_norm < 0.05 and self.stuck_counter < self.CONFIG["STUCK_THRESHOLD"]:
             reward -= 0.5 # Aïe ! Bouge de là !
 
-        drone_pos_array = np.array(self.drone_agent.get_position())
-        rayon_capteur = self.drone_agent.get_capteur().get_rayon() 
-
-        # --- 3. LOGIQUE D'EXPLORATION (GRID / FOG OF WAR) ---
-        # On convertit la position en coordonnées de grille (Cellule de 50x50 pixels)
-
-        grid_x = int(curr_x // 50)
-        grid_y = int(curr_y // 50)
+       # --- 4. EXPLORATION INTELLIGENTE (HEATMAP) ---
+        grid_x = int(new_pos[0] // 50)
+        grid_y = int(new_pos[1] // 50)
         
-        is_new_cell = False # Drapeau pour savoir si on a exploré ce tour-ci
-
-        grid_x = int(curr_x // 50)
-        grid_y = int(curr_y // 50)
-        
-        is_new_cell = False 
-
         if 0 <= grid_x < self.grid_w and 0 <= grid_y < self.grid_h:
-            if not self.visited_grid[grid_x, grid_y]:
-                # --- DÉCOUVERTE (C'est la fête !) ---
-                self.visited_grid[grid_x, grid_y] = True
-                reward += 0.5 
-                is_new_cell = True 
-                self.zones_visitees.append(drone_pos_array.copy())
-                
-                # Le drone est content, il oublie son ennui
-                self.consecutive_visited_steps = 0 
+            current_heat = self.heatmap[grid_x, grid_y]
+            
+            # Formule : On récompense la nouveauté, mais on ne punit plus le passage !
+            # Si heat est 0.0 -> Reward +0.5
+            # Si heat est 1.0 -> Reward 0.0 (Neutre)
+            reward_explo = (1.0 - current_heat) * 0.5
+            
+            if reward_explo > 0.05: 
+                reward += reward_explo # C'est frais, bravo !
+                self.steps_since_discovery = 0 
             else:
-                # --- DÉJÀ VU (La pression monte) ---
-                self.consecutive_visited_steps += 1
-                
-                # Calcul de la pénalité progressive
-                # On cape le multiplicateur pour éviter le suicide (Max 50)
-                facteur = min(self.consecutive_visited_steps, self.CONFIG["ENNUI_CAP"])
-                
-                # Pénalité = -0.01 * facteur
-                # Ex: au bout de 50 steps, il perd -0.5 par mouvement !
-                reward -= self.CONFIG["ENNUI_FACTOR"] * facteur
-        
-        if is_new_cell:
-            self.steps_since_discovery = 0 # <-- On reset le compteur, bravo !
+                # C'est une zone déjà visitée.
+                # ON NE PUNIT PAS DIRECTEMENT (pour lui permettre de traverser un couloir connu)
+                # La seule punition est celle du temps qui passe (-0.01 par step)
+                self.steps_since_discovery += 1 
+            
+            # On marque le territoire (On remet la chaleur à 1.0)
+            self.heatmap[grid_x, grid_y] = 1.0
         else:
-            self.steps_since_discovery += 1 # <-- On s'impatiente...
-        # --- 4. Reward Shaping & Victoire ---
-        # On utilise le 'CCD' (Continuous Collision Detection) pour ne pas rater la cible
+            self.steps_since_discovery += 1 # Hors map (ne devrait pas arriver)
+
+        # PUNITIF PROGRESSIF : Si ça fait trop longtemps qu'il n'a rien découvert
+        if self.steps_since_discovery > 150:
+             reward -= 0.05 # Là on commence à s'énerver : "Bouge de là !"
+
+        # --- 5. LOGIQUE CIBLE & VICTOIRE (TARGET HANDLING) ---
+        drone_pos_array = new_pos
+        rayon_capteur = self.drone_agent.get_capteur().get_rayon()
         
-        # Distance à l'arrêt (comme avant)
+        # Distances
         dist_arret = np.linalg.norm(self.cible_pos - drone_pos_array)
         
-        # Distance minimale durant le trajet (NOUVEAU)
-        dist_trajet = utils.dist_segment_point(prev_pos, drone_pos_array, self.cible_pos)
-        
-        # On gagne si on s'arrête dessus OU si on l'a traversée
-        # (On prend le min des deux pour être sûr)
-        dist_reelle = min(dist_arret, dist_trajet)
-
-        # Guidage terminal (Chaud/Froid)
-        # On utilise dist_arret pour le guidage car on veut qu'il s'arrête dessus idéalement
-        if dist_arret <= rayon_capteur:
-            
-            # 1. L'EFFET AIMANT (MAGNETISM)
-            # Dès qu'il la voit, il gagne des points juste pour rester à proximité.
-            # C'est supérieur au bonus d'exploration (+0.5), donc il ne voudra plus partir.
-            reward += 2.0 
-            
-            # 2. APPROCHE AGRESSIVE
-            if dist_arret < self.distance_precedente:
-                # On booste le gain quand il s'approche
-                # Formule exponentielle : plus il est près, plus ça rapporte
-                bonus = 30.0 / (dist_arret + 1.0) 
-                reward += bonus
-            else:
-                # 3. INTERDICTION DE RECULER
-                # C'est ICI que tout change.
-                # Avant, tu avais : "if not is_new_cell: reward -= 0.1"
-                # Maintenant : ON PUNIT TOUT LE TEMPS.
-                # Même s'il y a une case inexplorée derrière lui, s'il recule alors qu'il voit la cible : PUNITION.
-                reward -= 5.0
-        
-        self.distance_precedente = dist_arret
-
-        # --- 5. PRIME DE VISÉE (Target Lock) 🔫 ---
-        # On utilise dist_arret (calculé plus haut)
-        
+        # On vérifie si on voit la cible
         target_detected = (dist_arret <= rayon_capteur)
         
         if target_detected:
-            # --- HUNTER MODE ACTIF 🦁 ---
-            if is_new_cell:
-                # ANNULATION du bonus d'exploration : On ne veut pas qu'il soit distrait !
-                reward -= 0.5 
+            # --- A. L'EFFET AIMANT & GUIDAGE ---
+            # 1. Magnetism : Dès qu'il la voit, il gagne des points pour rester
+            reward += 2.0 
             
+            # 2. Approche Agressive vs Recul
+            if dist_arret < self.distance_precedente:
+                # Bonus exponentiel pour l'approche
+                bonus = 30.0 / (dist_arret + 1.0) 
+                reward += bonus
+            else:
+                # INTERDICTION DE RECULER si on voit la cible
+                reward -= 5.0
+            
+            # --- B. PRIME DE VISÉE (HUNTER MODE) ---
             vec_cible = self.cible_pos - drone_pos_array
             vec_vitesse = np.array([dx, dy]) 
-            
             norm_cible = np.linalg.norm(vec_cible)
             norm_vitesse = np.linalg.norm(vec_vitesse)
             
             if norm_cible > 0 and norm_vitesse > 0:
-                # Produit scalaire
                 alignement = np.dot(vec_cible / norm_cible, vec_vitesse / norm_vitesse)
                 
-                # --- CHANGEMENT ICI ---
-                # On recompense massivement l'alignement quand on est proches
                 if alignement > 0.5:
-                    danger_max = max(self._get_obs()[4:20]) 
-                    
-                    facteur = 1.0
-                    if danger_max > 0.85: 
-                        facteur = 0.5 # On est un peu plus téméraire (0.2 -> 0.5)
-                    
-                    # BOOST MASSIF : 1.5 -> 5.0
-                    reward += alignement * 5.0 * facteur
-                    
-                    # BONUS DE PROXIMITÉ (Plus on est près, plus c'est rentable)
-                    # Ex: à 10px -> (80 - 10) * 0.1 = +7 points !
-                    reward += (rayon_capteur - dist_arret) * 0.1
+                    # On vérifie s'il y a du danger proche (pour récompenser l'audace)
+                    # Note: on récupère les capteurs via scan_lidar direct pour éviter boucle infinie _get_obs
+                    # Mais pour simplifier ici, on suppose que l'audace est constante ou on garde ta logique
+                    reward += alignement * 5.0 
+                    reward += (rayon_capteur - dist_arret) * 0.1 # Bonus proximité
+        
+        self.distance_precedente = dist_arret
 
-        # VICTOIRE : On vérifie si on a touché la zone à un moment du trajet
-        if dist_reelle <= self.rayon_capture:
+        # --- 6. VICTOIRE STABILISÉE ---
+        # On ne gagne plus instantanément, il faut rester dessus
+        
+        if dist_arret < self.CONFIG["RAYON_CAPTURE"]:
+            self.steps_on_target += 1
+            reward += 1.0 # Félicitations pour la stabilité
+        else:
+            self.steps_on_target = 0 # Reset s'il sort de la zone
+            
+        # La victoire n'arrive que s'il est resté stable 30 frames (0.5 seconde)
+        if self.steps_on_target > 30:
             reward += 1000.0
             terminated = True
+            print(f"🎯 CIBLE CAPTURÉE ET STABILISÉE au step {self.current_step}!")
 
-        # --- AJOUT : ARRÊT PRÉMATURÉ (TIMEOUT DE PATIENCE) ---
+        # --- 7. TIMEOUTS ---
+        # Patience (si pas d'exploration depuis longtemps)
         if self.steps_since_discovery >= self.CONFIG["PATIENCE"]:
-            truncated = True # On coupe l'épisode
-            reward -= 5.0 # Petite punition pour dire "Tu étais trop lent/bloqué"
+            truncated = True 
+            reward -= 5.0 # Punition "Tu es trop lent/bloqué"
 
         self.current_step += 1
-        # Max steps arret
         if self.current_step >= self.max_steps:
             truncated = True
 
@@ -342,28 +345,24 @@ class DroneEnv(gym.Env):
             self.current_velocity = np.array([0.0, 0.0])
         vel_x, vel_y = self.current_velocity
         
-        # --- NOUVEAU : CAPTEURS D'EXPLORATION (4 valeurs) ---
+        # --- CAPTEURS D'EXPLORATION (Heatmap Sensors) ---
         curr_x, curr_y = self.drone_agent.get_position()
-        gx = int(curr_x // 50) # Coordonnée grille actuelle
+        gx = int(curr_x // 50)
         gy = int(curr_y // 50)
         
-        # On vérifie les 4 voisins (Haut, Bas, Gauche, Droite)
-        # 0.0 = Inconnu (Bon), 1.0 = Déjà visité (Ennuyeux) ou Hors Map (Mur)
         explo_sensors = []
-        
-        offsets = [(0, -1), (0, 1), (-1, 0), (1, 0)] # Nord, Sud, Ouest, Est
+        offsets = [(0, -1), (0, 1), (-1, 0), (1, 0)] # N, S, O, E
         
         for dx, dy in offsets:
             nx, ny = gx + dx, gy + dy
-            
-            # Si hors de la carte, on considère comme "visité" pour ne pas qu'il y aille
             if not (0 <= nx < self.grid_w and 0 <= ny < self.grid_h):
-                explo_sensors.append(1.0)
-            # Sinon, on regarde si c'est True (visité) ou False (nouveau)
-            elif self.visited_grid[nx, ny]:
-                explo_sensors.append(1.0)
+                explo_sensors.append(1.0) # Mur = Comme si c'était visité (repoussant)
             else:
-                explo_sensors.append(0.0) # C'est nouveau !
+                # On lit la Heatmap (float) :
+                # 0.9 = Je viens de passer là (ne pas y aller)
+                # 0.1 = Je suis passé il y a longtemps (ok pour y retourner)
+                # 0.0 = Jamais visité (Fonce !)
+                explo_sensors.append(self.heatmap[nx, ny])
 
         # Assemblage final (25 valeurs)
         # Ajout du Capteur de Proximité Radar (0.0 = Loin/Pas vu, 1.0 = Dessus)
@@ -393,10 +392,18 @@ class DroneEnv(gym.Env):
             # Récupération rayon depuis l'objet Capteur
             r = int(self.drone_agent.get_capteur().get_rayon())
             
-            for centre in self.zones_visitees:
-                s = pygame.Surface((r*2, r*2), pygame.SRCALPHA)
-                pygame.draw.circle(s, (40, 40, 70, 128), (r, r), r)
-                self.screen.blit(s, (centre[0]-r, centre[1]-r))
+            # --- Visualisation Heatmap (Olfactive) ---
+            # On dessine des carrés rouges là où c'est "Chaud"
+            for x in range(self.grid_w):
+                for y in range(self.grid_h):
+                    heat = self.heatmap[x, y]
+                    if heat > 0.01: # Si la case est un peu chaude
+                        # Couleur : Rouge transparent selon l'intensité
+                        # heat va de 0 à 1. Alpha max 150 pour voir à travers.
+                        alpha = int(heat * 150)
+                        s = pygame.Surface((50, 50), pygame.SRCALPHA)
+                        s.fill((255, 50, 50, alpha)) # Rouge
+                        self.screen.blit(s, (x * 50, y * 50))
 
             pos_int = (int(self.drone_agent.get_x()), int(self.drone_agent.get_y()))
             

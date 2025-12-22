@@ -7,7 +7,7 @@ from Drone import Drone
 from Capteur import Capteur
 
 capteur = Capteur(rayon=80)
-drone = Drone(id=1, x=0, y=0, capteur=capteur, vitesse=4)
+drone = Drone(id=1, x=0, y=0, capteur=capteur, vitesse=3)
 env = DroneEnv(drone, capteur, render_mode="human")
 
 print("Chargement du modèle LSTM...")
