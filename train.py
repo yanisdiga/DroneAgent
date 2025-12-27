@@ -27,10 +27,6 @@ class ScoreCallback(BaseCallback):
                         self.best_reward = current_reward
                         self.model.save("drone_model_best") 
                         print(f"🔥 NEW RECORD: {self.best_reward:.2f} (Épisode {self.episode_count})")
-                    
-                    # Petit log périodique pour savoir que ça tourne
-                    elif self.episode_count % 100 == 0:
-                        print(f"Épisode {self.episode_count} | Score récent: {current_reward:.2f}")
                         
         return True
 
@@ -40,7 +36,8 @@ if __name__ == '__main__': # Indispensable sous Windows
     # et de les emballer dans un SubprocVecEnv.
     capteur = Capteur(rayon=80)
     drone = Drone(id=1, x=0, y=0, capteur=capteur, vitesse=5)
-    env = make_vec_env(DroneEnv, n_envs=8, vec_env_cls=SubprocVecEnv, env_kwargs={"drone": drone, "capteur": capteur})
+    core = 8
+    env = make_vec_env(DroneEnv, n_envs=core, vec_env_cls=SubprocVecEnv, env_kwargs={"drone": drone, "capteur": capteur})
     
     # 3. CRÉATION DU MODÈLE (LSTM / MÉMOIRE)
     # On utilise maintenant RecurrentPPO avec une politique LSTM ("MlpLstmPolicy")
@@ -56,7 +53,7 @@ if __name__ == '__main__': # Indispensable sous Windows
         policy_kwargs={"lstm_hidden_size": 256} # On donne un gros cerveau mémoire
     )
 
-    print("🚀 Début de l'entraînement TURBO (8 Cœurs)...")
+    print("🚀 Début de l'entraînement TURBO (" + str(core) + " Cœurs)...")
     callback = ScoreCallback()
 
     # 4. LANCEMENT

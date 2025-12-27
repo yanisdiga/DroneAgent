@@ -1,7 +1,7 @@
 # test.py
 import pygame
 import numpy as np
-from sb3_contrib import RecurrentPPO # Import Contrib
+from sb3_contrib import RecurrentPPO
 from drone_env import DroneEnv
 from Drone import Drone
 from Capteur import Capteur
@@ -10,48 +10,53 @@ capteur = Capteur(rayon=80)
 drone = Drone(id=1, x=0, y=0, capteur=capteur, vitesse=3)
 env = DroneEnv(drone, capteur, render_mode="human")
 
-print("Chargement du modèle LSTM...")
-model = RecurrentPPO.load("drone_model_final") # Charge le bon fichier
-print("Modèle chargé ! 🧠")
+model = "drone_model_final" # // drone_model_final
 
-obs, _ = env.reset()
+print("Chargement du modèle : " + model + " ...")
+try:
+    model = RecurrentPPO.load(model)
+    print("Modèle chargé ! 🧠")
+except:
+    print("Erreur : Modèle : "+ model +" non trouvé. Vérifie le nom du fichier.")
+    exit()
 
-# INITIALISATION DE LA MÉMOIRE DU DRONE
-# Le LSTM a besoin d'un état initial (vide au début)
-# (1 = nb_envs, 2*lstm_hidden_size pour le LSTM state)
-# Le plus simple est de laisser None au début, ou :
-lstm_states = None 
-num_envs = 1 
-# Si tu veux être propre : lstm_states = np.zeros((num_envs, 2 * 64)) mais None marche souvent
+# --- SÉLECTION DU NIVEAU ---
+# 0: Vide (Murs uniquement)
+# 1: Facile (Quelques obstacles)
+# 2: Moyen (Obstacles standards)
+# 3: Difficile (Beaucoup d'obstacles)
+# R: Random"
+
+difficulty_option = 2
 
 episodes = 5
+lstm_states = None 
 
 for ep in range(episodes):
     print(f"--- Épisode {ep + 1} ---")
+
+    if difficulty_option is not None:
+        obs, _ = env.reset(options={"difficulty": difficulty_option})
+    else:
+        obs, _ = env.reset() # Random par défaut
+        
     terminated = False
     truncated = False
     score = 0
-    
-    # Reset de la mémoire à chaque nouvel épisode ! (Important)
-    lstm_states = None
+    lstm_states = None # Reset mémoire
     
     while not terminated and not truncated:
-        # IMPORTANT : On passe 'lstm_states' et on récupère le NOUVEAU 'lstm_states'
-        # C'est comme ça que le drone se souvient du passé.
-        # On utilise deterministic=True pour voir le "vrai" comportement appris (sans bruit aléatoire)
-        action, _states = model.predict(obs, state=lstm_states, deterministic=True)
-        
+        action, lstm_states = model.predict(obs, state=lstm_states, deterministic=True)
         obs, reward, terminated, truncated, info = env.step(action)
         score += reward
-        
         env.render()
         
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 terminated = True
                 episodes = 0
+                break # Sortie propre
 
     print(f"Score: {score:.2f}")
-    obs, _ = env.reset()
 
 pygame.quit()
