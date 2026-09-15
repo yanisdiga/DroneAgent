@@ -62,7 +62,7 @@ To solve the *sparse reward* problem, the environment uses a composite function:
 ```bash
 # Clone the repository
 git clone [https://github.com/yanisdiga/DroneAgent.git](https://github.com/yanisdiga/DroneAgent.git)
-cd Nom-Du-Repo
+cd DroneAgent
 
 # Install dependencies
 gymnasium
